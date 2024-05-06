@@ -1,10 +1,10 @@
 //SPDX-License-Identifier: MIT
-pragma solidity ^0.8.18;
+pragma solidity ^0.8.0;
 
 import "./MainMultiMode.sol";
 import "./Referral.sol";
 
-contract Lottery { // 0-99 1/100
+contract LotteryV3 { // 0-99 1/100
  
     MultiMode public main;
     ReferralProgram public ref;
@@ -23,13 +23,22 @@ contract Lottery { // 0-99 1/100
         _;
     }
 
+    bool private locked;
+
+    modifier nonReentrant{
+        require(!locked, "ReentrancyGuard: reentrant call");
+        locked = true;
+        _;
+        locked = false;
+    }
+
     bool public paused;
 
     function pause() public onlyOwner{
         paused = true;
     }
 
-    function open() public onlyOwner{
+    function resume() public onlyOwner{
         paused = false;
     }
 
@@ -47,8 +56,8 @@ contract Lottery { // 0-99 1/100
     mapping(uint32 => bool) public claimed;
     mapping(uint32 => mapping(address => bool)) public hasParti;
     mapping(uint32 => uint) public prizePerWinnerMap;
-    uint256 public ticketPrice = 150000000000000;
-    uint8 public ticketLimit = 25;
+    uint256 public ticketPrice = 150000000000000; 
+    uint8 public ticketLimit = 15;
     uint256 public totalPrize;
     uint256 public totalLastPrize;
     uint8 public lotRandomVar;
@@ -98,15 +107,15 @@ contract Lottery { // 0-99 1/100
         } else if(_per == 15){ //15% for referrer
             per = 7;
         }
+
+        referrerProfit = ticketPrice/per;
     }
 
-    function buyTickets(uint8[] calldata myTickets) public payable notPaused{
+    function buyTickets(uint8[] calldata myTickets) public payable notPaused nonReentrant{
         require(block.timestamp < finalDate[lotteryId], "Lottery is closed");
-        address referrer = ref.myReferrer(msg.sender);
-        if(referrer != address(0)){
-            require(msg.value == (ticketPrice * myTickets.length) + (referrerProfit * myTickets.length), "Send more ETH");
-        } else {require(msg.value == ticketPrice * myTickets.length, "Send more ETH");}
+        require(msg.value == (ticketPrice * myTickets.length), "Send more ETH");
         require(userTickets[lotteryId][msg.sender].length <= ticketLimit, "Maximum reached");
+        address referrer = ref.myReferrer(msg.sender);
         if(hasParti[lotteryId][msg.sender] == false){
             participants[lotteryId].push(msg.sender);
             hasParti[lotteryId][msg.sender] = true;
@@ -116,26 +125,68 @@ contract Lottery { // 0-99 1/100
         }
         lotRandomVar = myTickets[0];
         if(referrer != address(0)){
-        totalPrize += msg.value - (referrerProfit *  myTickets.length);
-        earnedFromFees[referrer] += referrerProfit * myTickets.length;
+            totalPrize += msg.value - (referrerProfit *  myTickets.length);
+            earnedFromFees[referrer] += referrerProfit * myTickets.length;
         } else {totalPrize += msg.value;}
         uint16 pointsToAdd = points * uint16(myTickets.length);
         main.changePoints(1, pointsToAdd, true, msg.sender);
     }
 
+    address public autoLotteryContract;
+
+    function setAutoLotAddress(address autoL) public onlyOwner{
+        autoLotteryContract = autoL;
+    }
+
+    function buyTicketsFromContract(address user, uint8[] calldata myTickets) public payable notPaused nonReentrant{
+        require(msg.sender == autoLotteryContract);
+        require(block.timestamp < finalDate[lotteryId], "Lottery is closed");
+        require(msg.value == (ticketPrice * myTickets.length), "Send more ETH");
+        require(userTickets[lotteryId][user].length <= ticketLimit, "Maximum reached");
+        address referrer = ref.myReferrer(user);
+        if(hasParti[lotteryId][user] == false){
+            participants[lotteryId].push(user);
+            hasParti[lotteryId][user] = true;
+        }
+        for(uint8 i = 0; i < myTickets.length; i++){
+            userTickets[lotteryId][user].push(myTickets[i]);
+        }
+        lotRandomVar = myTickets[0];
+        if(referrer != address(0)){
+            totalPrize += msg.value - (referrerProfit *  myTickets.length);
+            earnedFromFees[referrer] += referrerProfit * myTickets.length;
+        } else {totalPrize += msg.value;}
+        uint16 pointsToAdd = points * uint16(myTickets.length);
+        main.changePoints(1, pointsToAdd, true, user);
+    }
+
     function referrerClaim() public {
         require(earnedFromFees[msg.sender] > 0);
-        payable(msg.sender).transfer(earnedFromFees[msg.sender]);
+        uint toSend = earnedFromFees[msg.sender];
         earnedFromFees[msg.sender] = 0;
+        payable(msg.sender).transfer(toSend);
     }
 
     mapping(address => uint256) public earnedInLottery;
+    uint8 nxtLotFee = 10;
+    uint8 mmFee = 10;
 
-    function sendPrizeToWinners() public onlyOwner notPaused{
-        require(finalDate[lotteryId] < block.timestamp); // Lottery has finished
+    function setFees(uint8 next, uint8 mm) public onlyOwner{
+        nxtLotFee = next;
+        mmFee = mm;
+        /*
+        5 = 20%
+        10 = 10%
+        20 = 5%
+        33 = 3%
+        */
+    }
+
+    function sendPrizeToWinners() public onlyOwner notPaused nonReentrant{
+        require(finalDate[lotteryId] < block.timestamp);
         require(claimed[lotteryId] == false);
         claimed[lotteryId] = true;
-        uint256 winnerNumber = uint256(keccak256(abi.encodePacked(lotteryId, finalDate[lotteryId], lotRandomVar, participants[lotteryId].length))) % 100; // 0-99
+        uint256 winnerNumber = uint256(keccak256(abi.encodePacked(lotteryId, finalDate[lotteryId], lotRandomVar, participants[lotteryId].length, block.timestamp))) % 100; // 0-99
         winnerTicket[lotteryId] = winnerNumber;
         uint256 partiNum = participants[lotteryId].length;
         for(uint32 i = 0; i < partiNum; i++){
@@ -147,8 +198,8 @@ contract Lottery { // 0-99 1/100
                 }
             }
         }
-        uint256 multimodeFee = totalPrize/10;
-        uint256 nextLotteryPrize = totalPrize/10;
+        uint256 multimodeFee = totalPrize/mmFee;
+        uint256 nextLotteryPrize = totalPrize/nxtLotFee;
         uint256 finalPrize = totalPrize - (multimodeFee + nextLotteryPrize);
         totalLastPrize = finalPrize;
         if(winners[lotteryId].length > 0){
@@ -164,17 +215,18 @@ contract Lottery { // 0-99 1/100
         emit LotteryClosed(winnerNumber);
     }
 
-    function claimLotteryPrize() public {
+    function claimLotteryPrize() public nonReentrant{
         require(earnedInLottery[msg.sender] > 0);  
-        payable(msg.sender).transfer(earnedInLottery[msg.sender]);
+        uint toSend = earnedInLottery[msg.sender];
         earnedInLottery[msg.sender] = 0;
+        payable(msg.sender).transfer(toSend);
     }
 
     function getMyPrize(address user) public view returns(uint256){
         return(earnedInLottery[user]);
     }
 
-    function withdraw10() public onlyOwner{ // We can withdraw the nextLotteryPrize in case we want to Update the Lottery Contract
+    function withdraw10() public onlyOwner nonReentrant{ // We can withdraw the nextLotteryPrize in case we want to Update the Lottery Contract
         require(finalDate[lotteryId] < block.timestamp);
         require(claimed[lotteryId]);
         payable(treasury).transfer(totalPrize);
@@ -219,11 +271,8 @@ contract Lottery { // 0-99 1/100
         lotteryResult memory result;
 
         result.finalDate = finalDate[lotteryId];
-        address referrer = ref.myReferrer(msg.sender);
-        if(referrer != address(0)){
-           result.ticketPrice = ticketPrice + referrerProfit;
-        } else {result.ticketPrice = ticketPrice;}
-        result.totalPrize = totalPrize - (totalPrize/10);
+        result.ticketPrice = ticketPrice;
+        result.totalPrize = totalPrize - (totalPrize/mmFee);
         result.numberOfParticipants = participants[lotteryId].length;
         result.yourTickets = userTickets[lotteryId][user];
         result.tickLimit = ticketLimit;
@@ -233,7 +282,6 @@ contract Lottery { // 0-99 1/100
     function addPrize() public payable {
         totalPrize += msg.value;
     }
-
 
     function getMyLastLotteries(address user) public view returns(uint256[] memory, uint256[] memory, uint256[] memory) {
         uint256[] memory winnerNumbers = new uint256[](lotteryId);
@@ -247,7 +295,6 @@ contract Lottery { // 0-99 1/100
                 }
             }
             finalDates[i] = finalDate[i];
-        
         }
         return(finalDates, winnerNumbers, yourPrize);
     }
